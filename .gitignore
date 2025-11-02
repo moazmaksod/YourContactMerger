@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# VSCode
+.vscode/
+
+# Qodo
+.qodo/
+
+# Output files
+Contacts/output/
+.env
