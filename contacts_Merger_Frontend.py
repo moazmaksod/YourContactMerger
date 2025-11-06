@@ -266,7 +266,10 @@ def main(page: ft.Page):
             )
         except Exception as err:
             page.open(
-                ft.SnackBar(ft.Text(f"Error saving credentials: {err}"), bgcolor=theme_color(page, "error"))
+                ft.SnackBar(
+                    ft.Text(f"Error saving credentials: {err}"),
+                    bgcolor=theme_color(page, "error"),
+                )
             )
         page.update()
 
@@ -298,7 +301,10 @@ def main(page: ft.Page):
             )
         except Exception as err:
             page.open(
-                ft.SnackBar(ft.Text(f"Error clearing credentials: {err}"), bgcolor=theme_color(page, "error"))
+                ft.SnackBar(
+                    ft.Text(f"Error clearing credentials: {err}"),
+                    bgcolor=theme_color(page, "error"),
+                )
             )
         page.update()
 
@@ -539,6 +545,10 @@ def main(page: ft.Page):
         on_click=lambda e: threading.Thread(target=run_merge, daemon=True).start(),
     )
 
+    def handle_exit(e):
+        print("Exit button pressed. Forcing application shutdown via taskkill.")
+        os.system(f'taskkill /F /PID {os.getpid()} /T')
+
     exit_btn = ft.FilledButton(
         "Exit",
         icon=ft.Icons.CLOSE,
@@ -548,7 +558,7 @@ def main(page: ft.Page):
             bgcolor={ft.ControlState.DEFAULT: theme_color(page, "error")},
             shape=ft.RoundedRectangleBorder(radius=8),
         ),
-        on_click=lambda _: page.window.destroy(),
+        on_click=handle_exit,
     )
 
     actions_box = section(
