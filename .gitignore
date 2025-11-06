@@ -17,3 +17,8 @@ venv/
 # Output files
 Contacts/output/
 .env
+
+# PyInstaller build files
+/build/
+/dist/
+*.spec

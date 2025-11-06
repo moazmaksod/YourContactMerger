@@ -3,7 +3,7 @@ import threading
 import os
 import datetime
 import Contacts_Merger_Backend as backend
-from dotenv import load_dotenv
+import keyring
 
 LOGO_PATH = "assets/logo.png"
 
@@ -42,7 +42,6 @@ summary_metrics = []
 
 
 def main(page: ft.Page):
-    load_dotenv()
     page.title = "Contacts Merger v3.6.3"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.window.width = 980
@@ -250,11 +249,82 @@ def main(page: ft.Page):
         dense=True,
     )
 
-    # Prefill from .env file
-    db_server.value = os.getenv("DB_SERVER", "")
-    db_name.value = os.getenv("DB_DATABASE", "")
-    db_user.value = os.getenv("DB_USER", "")
-    db_pass.value = os.getenv("DB_PASSWORD", "")
+    # --- Credential Management ---
+    KEYRING_SERVICE = "ContactsMerger"
+
+    def save_credentials(e):
+        try:
+            keyring.set_password(KEYRING_SERVICE, "db_server", db_server.value or "")
+            keyring.set_password(KEYRING_SERVICE, "db_name", db_name.value or "")
+            keyring.set_password(KEYRING_SERVICE, "db_user", db_user.value or "")
+            keyring.set_password(KEYRING_SERVICE, "db_pass", db_pass.value or "")
+            page.open(
+                ft.SnackBar(
+                    ft.Text("✅ Credentials saved securely."),
+                    bgcolor=theme_color(page, "success"),
+                )
+            )
+        except Exception as err:
+            page.open(
+                ft.SnackBar(ft.Text(f"Error saving credentials: {err}"), bgcolor=theme_color(page, "error"))
+            )
+        page.update()
+
+    def load_credentials():
+        try:
+            db_server.value = keyring.get_password(KEYRING_SERVICE, "db_server") or ""
+            db_name.value = keyring.get_password(KEYRING_SERVICE, "db_name") or ""
+            db_user.value = keyring.get_password(KEYRING_SERVICE, "db_user") or ""
+            db_pass.value = keyring.get_password(KEYRING_SERVICE, "db_pass") or ""
+        except Exception as err:
+            print(f"Could not load credentials from store: {err}")
+        page.update()
+
+    def delete_credentials(e):
+        try:
+            keyring.delete_password(KEYRING_SERVICE, "db_server")
+            keyring.delete_password(KEYRING_SERVICE, "db_name")
+            keyring.delete_password(KEYRING_SERVICE, "db_user")
+            keyring.delete_password(KEYRING_SERVICE, "db_pass")
+            db_server.value = ""
+            db_name.value = ""
+            db_user.value = ""
+            db_pass.value = ""
+            page.open(
+                ft.SnackBar(
+                    ft.Text("🗑️ Saved credentials cleared."),
+                    bgcolor=theme_color(page, "warning"),
+                )
+            )
+        except Exception as err:
+            page.open(
+                ft.SnackBar(ft.Text(f"Error clearing credentials: {err}"), bgcolor=theme_color(page, "error"))
+            )
+        page.update()
+
+    # Load credentials on startup
+    load_credentials()
+
+    cred_buttons = ft.Row(
+        [
+            ft.FilledButton(
+                "Save Credentials",
+                icon=ft.Icons.SAVE,
+                on_click=save_credentials,
+                style=ft.ButtonStyle(
+                    color=ft.Colors.WHITE,
+                    bgcolor=theme_color(page, "primary"),
+                ),
+            ),
+            ft.TextButton(
+                "Clear Saved",
+                icon=ft.Icons.DELETE_FOREVER,
+                on_click=delete_credentials,
+                style=ft.ButtonStyle(color=theme_color(page, "error")),
+            ),
+        ],
+        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+    )
 
     options_box = section(
         ft.Column(
@@ -279,6 +349,7 @@ def main(page: ft.Page):
                 db_name,
                 db_user,
                 db_pass,
+                cred_buttons,
             ],
             spacing=4,
             expand=True,
