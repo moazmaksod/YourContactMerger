@@ -5,3 +5,5 @@ python-dotenv
 pyinstaller
 Pillow
 keyring
+google-api-python-client
+google-auth-oauthlib

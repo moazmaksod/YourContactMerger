@@ -2,6 +2,12 @@ import pandas as pd
 import re
 from collections import defaultdict, Counter
 from copy import deepcopy
+import os
+import json
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 
 # ===============================
 # 🔧 CONFIGURATION SECTION
@@ -772,3 +778,165 @@ if __name__ == "__main__":
     export_contacts(merged)
 
     print("Merge complete.")
+# ===============================
+# 📥 LOAD CONTACTS FROM GOOGLE API
+# ===============================
+
+# If modifying these scopes, delete the file token.json.
+SCOPES = ['https://www.googleapis.com/auth/contacts.readonly']
+CLIENT_SECRET_FILE = 'client_secret.json'
+TOKEN_FILE = 'token.json'
+
+def load_google_contacts_from_api():
+    """
+    Loads Google Contacts using the People API, including fetching contact group
+    names to correctly determine labels and protected status.
+    """
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists(CLIENT_SECRET_FILE):
+                raise FileNotFoundError(
+                    f"'{CLIENT_SECRET_FILE}' not found. "
+                    "Please download it from the Google Cloud Console and place it in the root directory."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_FILE, 'w') as token:
+            token.write(creds.to_json())
+
+    service = build('people', 'v1', credentials=creds)
+
+    # First, fetch all contact groups to create a mapping from resource name to formatted name.
+    group_map = {}
+    try:
+        group_results = service.contactGroups().list().execute()
+        for group in group_results.get('contactGroups', []):
+            group_map[group.get('resourceName')] = group.get('formattedName')
+    except Exception as e:
+        print(f"⚠️ Could not fetch contact group names: {e}. Group names may be incomplete.")
+
+    # Fetch all contacts with all necessary fields
+    connections = []
+    next_page_token = None
+    while True:
+        results = service.people().connections().list(
+            resourceName='people/me',
+            pageSize=1000,
+            personFields='names,phoneNumbers,memberships,emailAddresses,organizations,addresses,biographies,birthdays,urls',
+            pageToken=next_page_token
+        ).execute()
+        
+        connections.extend(results.get('connections', []))
+        next_page_token = results.get('nextPageToken')
+        if not next_page_token:
+            break
+
+    # DUMP API RESPONSE FOR DEBUGGING
+    try:
+        with open('api_response_dump.json', 'w', encoding='utf-8') as f:
+            json.dump(connections, f, ensure_ascii=False, indent=4)
+        print("✅ API response saved to api_response_dump.json for debugging.")
+    except Exception as e:
+        print(f"⚠️ Could not save API response dump: {e}")
+
+    contacts = {}
+    for person in connections:
+        names = person.get('names', [])
+        if not names: continue
+        
+        primary_name = names[0]
+        first, middle, last = primary_name.get('givenName', ''), primary_name.get('middleName', ''), primary_name.get('familyName', '')
+        raw_name = primary_name.get('displayName', '').strip()
+
+        if not raw_name and (first or middle or last):
+             raw_name = " ".join([p for p in [first, middle, last] if p]).strip()
+        if not raw_name: continue
+
+        phone_numbers = person.get('phoneNumbers', [])
+        if not phone_numbers: continue
+        
+        numbers_list = expand_normalize_numbers([p.get('value') for p in phone_numbers])
+
+        # --- Correctly determine Groups / Labels ---
+        memberships = person.get('memberships', [])
+        group_names = []
+        if memberships:
+            for m in memberships:
+                cg_membership = m.get('contactGroupMembership')
+                if cg_membership:
+                    group_id = cg_membership.get('contactGroupResourceName')
+                    if group_id in group_map:
+                        group_names.append(group_map[group_id])
+        
+        if not group_names:
+            groups_raw = "* myContacts"
+        else:
+            # Replicate the "Labels" column format from the CSV
+            groups_raw = " ::: ".join(sorted(group_names))
+
+        # Use the same logic as the CSV loader to determine protection
+        def _is_lab_group(g: str) -> bool:
+            tokens = [t.strip().lower() for t in (g or "").split(":::")]
+            for t in tokens:
+                t_clean = re.sub(r"[^\w\s]", "", t)
+                if "lab" in t_clean:
+                    return True
+            return False
+        
+        is_lab = _is_lab_group(groups_raw)
+        groups = normalize_group_name(groups_raw)
+        name = normalize_display_name(raw_name, append_lab=is_lab, preserve_lab=True)
+        cmp_name = strip_lab_token(name).lower()
+
+        # --- Build _raw_row to match CSV structure ---
+        _raw_row = {
+            "First Name": first, "Middle Name": middle, "Last Name": last,
+            "Name": raw_name, "Group Membership": groups_raw, "Labels": groups_raw,
+        }
+        # (Fill the rest of _raw_row as before)
+        for i, num in enumerate(numbers_list[:4]):
+            _raw_row[f'Phone {i+1} - Value'] = num
+            _raw_row[f'Phone {i+1} - Type'] = 'Mobile'
+        emails = person.get('emailAddresses', [])
+        for i, email in enumerate(emails[:4]):
+            _raw_row[f'E-mail {i+1} - Value'] = email.get('value', '')
+            _raw_row[f'E-mail {i+1} - Type'] = email.get('type', 'Other')
+        orgs = person.get('organizations', [])
+        if orgs:
+            _raw_row['Organization 1 - Name'] = orgs[0].get('name', '')
+            _raw_row['Organization 1 - Title'] = orgs[0].get('title', '')
+        addresses = person.get('addresses', [])
+        if addresses:
+            _raw_row['Address 1 - Formatted'] = addresses[0].get('formattedValue', '')
+            _raw_row['Address 1 - Type'] = addresses[0].get('type', 'Home')
+        bios = person.get('biographies', [])
+        if bios:
+            _raw_row['Notes'] = bios[0].get('value', '')
+        birthdays = person.get('birthdays', [])
+        if birthdays:
+            bday = birthdays[0].get('date', {})
+            year, month, day = bday.get('year'), bday.get('month'), bday.get('day')
+            if year and month and day:
+                _raw_row['Birthday'] = f'{year:04d}-{month:02d}-{day:02d}'
+            elif month and day:
+                _raw_row['Birthday'] = f'--{month:02d}-{day:02d}'
+        websites = person.get('urls', [])
+        for i, site in enumerate(websites[:4]):
+            _raw_row[f'Website {i+1} - Value'] = site.get('value', '')
+            _raw_row[f'Website {i+1} - Type'] = site.get('type', 'Home Page')
+
+        # --- Final contact object ---
+        contacts[name] = {
+            "numbers": set(numbers_list), "groups": {groups},
+            "protected": not is_lab, "sources": {"Google"},
+            "_cmp_name": cmp_name, "first_name": first,
+            "middle_name": middle, "last_name": last,
+            "_raw_row": _raw_row,
+        }
+    return contacts

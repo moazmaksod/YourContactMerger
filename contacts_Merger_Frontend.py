@@ -117,15 +117,88 @@ def main(page: ft.Page):
         border_radius=10,
     )
 
-    # ---------------------------
-    # File Pickers
-    # ---------------------------
+    # ------------------------------------
+    # Google Contacts Source Selection
+    # ------------------------------------
+    google_source_method = ft.RadioGroup(
+        content=ft.Row(
+            [
+                ft.Radio(value="csv", label="CSV File"),
+                ft.Radio(value="api", label="Google API"),
+            ],
+            alignment=ft.MainAxisAlignment.START,
+        ),
+        value="csv",
+    )
+
+    # --- CSV Controls ---
     google_field = ft.TextField(
         label="Google Contacts CSV", read_only=True, dense=True, expand=True
     )
-    csv_list = ft.ListView(height=100, spacing=4)
-
     google_picker = ft.FilePicker(on_result=lambda e: pick_google(e))
+    google_btn = ft.FilledButton(
+        "Browse",
+        icon=ft.Icons.UPLOAD_FILE,
+        height=40,
+        style=ft.ButtonStyle(
+            color={ft.ControlState.DEFAULT: ft.Colors.WHITE},
+            bgcolor={ft.ControlState.DEFAULT: theme_color(page, "primary")},
+            shape=ft.RoundedRectangleBorder(radius=8),
+        ),
+        on_click=lambda _: google_picker.pick_files(),
+    )
+    csv_controls = ft.Row([google_field, google_btn], spacing=6, visible=True)
+
+    # --- API Controls ---
+    api_status_text = ft.Text("Ready to sync.", size=13, color=theme_color(page, "text_secondary"))
+    
+    def sync_google_api_click(e):
+        # This function will run in a separate thread
+        api_status_text.value = "Syncing... Please check your browser to authorize."
+        api_status_text.color = theme_color(page, "text_secondary")
+        page.update()
+        try:
+            # The backend function handles the full auth flow and data fetching
+            google_contacts_data = backend.load_google_contacts_from_api()
+            state["google_contacts"] = google_contacts_data
+            state["google_source"] = "api"
+            state["google_path"] = None # Clear path if we are using API
+            google_field.value = f"API: {len(google_contacts_data)} contacts synced"
+            api_status_text.value = f"✅ Synced {len(google_contacts_data)} contacts."
+            api_status_text.color = theme_color(page, "success")
+        except Exception as err:
+            api_status_text.value = f"Error: {err}"
+            api_status_text.color = theme_color(page, "error")
+        page.update()
+
+    google_api_btn = ft.FilledButton(
+        "Sync from Google",
+        icon=ft.Icons.SYNC,
+        height=40,
+        style=ft.ButtonStyle(
+            color={ft.ControlState.DEFAULT: ft.Colors.WHITE},
+            bgcolor={ft.ControlState.DEFAULT: theme_color(page, "primary")},
+            shape=ft.RoundedRectangleBorder(radius=8),
+        ),
+        on_click=lambda e: threading.Thread(target=sync_google_api_click, args=(e,), daemon=True).start(),
+    )
+    api_controls = ft.Column([google_api_btn, api_status_text], spacing=4, visible=False)
+
+    def on_google_source_change(e):
+        selected_source = e.control.value
+        state["google_source"] = selected_source
+        if selected_source == "csv":
+            csv_controls.visible = True
+            api_controls.visible = False
+        else:
+            csv_controls.visible = False
+            api_controls.visible = True
+        page.update()
+
+    google_source_method.on_change = on_google_source_change
+
+    # --- Other File Pickers ---
+    csv_list = ft.ListView(height=100, spacing=4)
     csv_picker = ft.FilePicker(on_result=lambda e: pick_csvs(e))
     page.overlay.extend([google_picker, csv_picker])
 
@@ -133,7 +206,9 @@ def main(page: ft.Page):
         if e.files:
             f = e.files[0]
             google_field.value = f.name
-            state["google"] = f.path
+            state["google_path"] = f.path
+            state["google_source"] = "csv"
+            state["google_contacts"] = None # Clear contacts if path changes
             page.update()
 
     def pick_csvs(e):
@@ -177,18 +252,6 @@ def main(page: ft.Page):
         state["csvs"].pop(idx)
         refresh_csvs()
 
-    google_btn = ft.FilledButton(
-        "Browse",
-        icon=ft.Icons.UPLOAD_FILE,
-        height=40,
-        style=ft.ButtonStyle(
-            color={ft.ControlState.DEFAULT: ft.Colors.WHITE},
-            bgcolor={ft.ControlState.DEFAULT: theme_color(page, "primary")},
-            shape=ft.RoundedRectangleBorder(radius=8),
-        ),
-        on_click=lambda _: google_picker.pick_files(),
-    )
-
     csv_btn = ft.FilledButton(
         "Add CSVs",
         icon=ft.Icons.LIBRARY_ADD,
@@ -210,7 +273,11 @@ def main(page: ft.Page):
                     weight=ft.FontWeight.BOLD,
                     color=theme_color(page, "text_primary"),
                 ),
-                ft.Row([google_field, google_btn], spacing=6),
+                ft.Text("Google Contacts Source:", weight=ft.FontWeight.BOLD),
+                google_source_method,
+                csv_controls,
+                api_controls,
+                ft.Divider(height=10),
                 ft.Row(
                     [
                         ft.Text(
@@ -371,15 +438,23 @@ def main(page: ft.Page):
         page.update()
 
         try:
-            # Validate inputs
-            google_path = state.get("google")
-            if not google_path:
-                raise ValueError("Please select a Google Contacts CSV before merging.")
+            # --- Load Google Contacts based on selected source ---
+            google_contacts = {}
+            source_type = state.get("google_source", "csv")
+            
+            if source_type == "csv":
+                google_path = state.get("google_path")
+                if not google_path:
+                    raise ValueError("Please select a Google Contacts CSV before merging.")
+                google_contacts = backend.load_google_contacts(google_path)
+            elif source_type == "api":
+                google_contacts = state.get("google_contacts")
+                if not google_contacts:
+                    raise ValueError("Please sync with Google API before merging.")
+            else:
+                raise ValueError("Invalid Google Contacts source selected.")
 
-            # Load Google contacts
-            google_contacts = backend.load_google_contacts(google_path)
-
-            # Load MSSQL contacts from each selected CSV
+            # --- Load MSSQL contacts ---
             mssql_contacts = {}
             for it in state.get("csvs", []):
                 path = it.get("path")
@@ -387,22 +462,18 @@ def main(page: ft.Page):
                     continue
                 try:
                     loaded = backend.load_mssql_contacts(path)
-                    # merge dicts: loaded may contain names overlapping across files
                     for n, d in loaded.items():
                         if n not in mssql_contacts:
                             mssql_contacts[n] = {"numbers": set(), "sources": set()}
                         mssql_contacts[n]["numbers"].update(d.get("numbers", set()))
-                        # propagate additional metadata
                         mssql_contacts[n]["sources"].update(d.get("sources", set()))
                         mssql_contacts[n]["first_name"] = d.get("first_name")
                         mssql_contacts[n]["middle_name"] = d.get("middle_name")
                         mssql_contacts[n]["last_name"] = d.get("last_name")
                         mssql_contacts[n]["original_name"] = d.get("original_name")
                 except Exception as e:
-                    # non-fatal: continue with others but record
                     print(f"⚠️ Warning: failed to read '{path}': {e}")
 
-            # Optionally load from DB if server/name provided
             if (db_server.value or "").strip() and (db_name.value or "").strip():
                 try:
                     db_loaded = backend.load_mssql_from_db(
@@ -423,98 +494,81 @@ def main(page: ft.Page):
                 except Exception as e:
                     print(f"⚠️ Warning: failed to load from DB: {e}")
 
-            # Merge
+            # --- Merge ---
             merge_result = backend.merge_contacts(google_contacts, mssql_contacts)
-            # merge_contacts now returns only merged dict; some versions may include logs
-            # support both shapes for backward compatibility
             if isinstance(merge_result, tuple) or isinstance(merge_result, list):
                 merged = merge_result[0]
                 per_row_logs = merge_result[1] if len(merge_result) > 1 else []
             else:
                 merged = merge_result
-                # try to access per_row_logs attr if backend produced it as a global
                 per_row_logs = getattr(backend, "LAST_PER_ROW_LOGS", [])
 
-            # Determine output folder and file path (create output/ next to Google CSV)
-            base_dir = os.path.dirname(google_path) or os.getcwd()
+            # --- Export ---
+            # Determine output folder. Use CWD if path is not available (API case)
+            base_dir = os.getcwd()
+            if state.get("google_path"):
+                base_dir = os.path.dirname(state.get("google_path"))
+
             output_dir = os.path.join(base_dir, "output")
             os.makedirs(output_dir, exist_ok=True)
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             output_file = os.path.join(output_dir, f"merged_contacts_{ts}.csv")
 
-            # Export unless dry-run (use Google CSV as template to preserve columns)
             if not dry.value:
+                # Use template if available, otherwise the backend handles defaults
+                template_path = state.get("google_path")
                 backend.export_contacts(
-                    merged, output_file=output_file, template=google_path
+                    merged, output_file=output_file, template=template_path
                 )
 
-            # Save a small log in output/ if requested
+            # --- Logging and Summary ---
             if log.value:
                 logp = os.path.join(output_dir, f"merge_log_{ts}.txt")
                 with open(logp, "w", encoding="utf-8") as fh:
                     fh.write(f"Merge run: {ts}\n")
-                    fh.write(f"Google file: {google_path}\n")
+                    google_file_info = state.get("google_path") or "Google API Sync"
+                    fh.write(f"Google source: {google_file_info}\n")
                     fh.write(
                         f"MSSQL files: {[x['path'] for x in state.get('csvs', [])]}\n"
                     )
                     fh.write(f"Total merged contacts: {len(merged)}\n\n")
 
-                    # Write detailed per-row logs if available
                     if per_row_logs:
                         fh.write("DETAILED ROW UPDATES:\n")
                         for rec in per_row_logs:
-                            # 1) original google row
                             fh.write("---\n")
                             fh.write("1) Original Google row:\n")
                             og = rec.get("original_google_row")
-                            if og:
-                                # og may be a dict of columns -> values
-                                fh.write(str(og) + "\n")
-                            else:
-                                fh.write("<no original row preserved>\n")
-
-                            # 2) the update data used to update this row
+                            fh.write(str(og) + "\n" if og else "<no original row preserved>\n")
                             fh.write("2) Update data applied:\n")
                             fh.write(str(rec.get("update_data", {})) + "\n")
-
-                            # 3) the final row snapshot as in the output file
                             fh.write("3) Final row in output:\n")
                             fh.write(str(rec.get("final_row", {})) + "\n")
                         fh.write("---\n")
                     else:
                         fh.write("No detailed per-row logs available.\n")
-
                 print(f"✅ Log saved to {logp}")
 
-            # The .env file is not updated by the application.
-            # You can update it manually if needed.
-
-            # Open output folder if requested
             if openf.value and os.path.exists(output_dir):
                 try:
                     os.startfile(output_dir)
                 except Exception:
                     pass
 
-            # Build summary data (coerce sources to sets for safety)
             data = {}
             data["Google"] = len(google_contacts)
             data["MSSQL"] = len(mssql_contacts)
             data["Total"] = len(merged)
-
             def _sources_is_only_mssql(v):
                 s = set(v.get("sources") or [])
                 return s == {"MSSQL"}
-
             def _sources_have_both(v):
                 s = set(v.get("sources") or [])
                 return ("Google" in s) and ("MSSQL" in s)
-
             data["New"] = sum(1 for v in merged.values() if _sources_is_only_mssql(v))
             data["Merged"] = sum(1 for v in merged.values() if _sources_have_both(v))
             data["Protected"] = sum(1 for v in merged.values() if v.get("protected"))
 
-            # Done
             progress_ring.visible = False
             progress_text.value = ""
             show_summary(data)

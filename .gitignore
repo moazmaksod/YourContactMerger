@@ -7,6 +7,7 @@ __pycache__/
 env/
 venv/
 .venv/
+output/
 
 # VSCode
 .vscode/
@@ -22,3 +23,8 @@ Contacts/output/
 /build/
 /dist/
 *.spec
+
+# Google API credentials
+client_secret.json
+token.json
+api_response_dump.json
