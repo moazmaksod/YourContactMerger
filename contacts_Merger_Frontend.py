@@ -158,17 +158,37 @@ def main(page: ft.Page):
         api_status_text.color = theme_color(page, "text_secondary")
         page.update()
         try:
-            # The backend function handles the full auth flow and data fetching
             google_contacts_data = backend.load_google_contacts_from_api()
-            state["google_contacts"] = google_contacts_data
-            state["google_source"] = "api"
-            state["google_path"] = None # Clear path if we are using API
-            google_field.value = f"API: {len(google_contacts_data)} contacts synced"
-            api_status_text.value = f"✅ Synced {len(google_contacts_data)} contacts."
-            api_status_text.color = theme_color(page, "success")
+            if google_contacts_data is not None:
+                num_contacts = len(google_contacts_data)
+                state["google_contacts"] = google_contacts_data
+                state["google_source"] = "api"
+                state["google_path"] = None # Clear path if we are using API
+                google_field.value = f"API: {num_contacts} contacts synced"
+                api_status_text.value = f"✅ Synced {num_contacts} contacts."
+                api_status_text.color = theme_color(page, "success")
+            else:
+                api_status_text.value = "Error: Received no data from API."
+                api_status_text.color = theme_color(page, "error")
         except Exception as err:
             api_status_text.value = f"Error: {err}"
             api_status_text.color = theme_color(page, "error")
+        page.update()
+
+    def google_api_logout(e):
+        try:
+            token_path = backend.TOKEN_FILE
+            if os.path.exists(token_path):
+                os.remove(token_path)
+            
+            api_status_text.value = "Ready to sync."
+            api_status_text.color = theme_color(page, "text_secondary")
+            google_field.value = ""
+            state["google_contacts"] = None
+            
+            page.open(ft.SnackBar(ft.Text("Logged out. You can now sync with a different account.")))
+        except Exception as err:
+            page.open(ft.SnackBar(ft.Text(f"Error: {err}")))
         page.update()
 
     google_api_btn = ft.FilledButton(
@@ -182,7 +202,22 @@ def main(page: ft.Page):
         ),
         on_click=lambda e: threading.Thread(target=sync_google_api_click, args=(e,), daemon=True).start(),
     )
-    api_controls = ft.Column([google_api_btn, api_status_text], spacing=4, visible=False)
+
+    logout_btn = ft.TextButton(
+        "Switch Account",
+        icon=ft.Icons.LOGOUT,
+        on_click=google_api_logout,
+        tooltip="Log out to connect with a different Google account"
+    )
+
+    api_controls = ft.Column(
+        [
+            ft.Row([google_api_btn, logout_btn], alignment=ft.MainAxisAlignment.START, spacing=10),
+            api_status_text
+        ], 
+        spacing=4, 
+        visible=False
+    )
 
     def on_google_source_change(e):
         selected_source = e.control.value
@@ -505,9 +540,8 @@ def main(page: ft.Page):
 
             # --- Export ---
             # Determine output folder. Use CWD if path is not available (API case)
-            base_dir = os.getcwd()
-            if state.get("google_path"):
-                base_dir = os.path.dirname(state.get("google_path"))
+            google_path = state.get("google_path")
+            base_dir = os.path.dirname(google_path) if google_path else os.getcwd()
 
             output_dir = os.path.join(base_dir, "output")
             os.makedirs(output_dir, exist_ok=True)

@@ -27,4 +27,3 @@ Contacts/output/
 # Google API credentials
 client_secret.json
 token.json
-api_response_dump.json
