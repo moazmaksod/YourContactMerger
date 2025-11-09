@@ -42,7 +42,7 @@ summary_metrics = []
 
 
 def main(page: ft.Page):
-    page.title = "Contacts Merger v3.6.3"
+    page.title = "Contacts Merger v3.7.0"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.window.width = 980
     page.window.height = 720
@@ -336,7 +336,8 @@ def main(page: ft.Page):
     # Options & Actions
     # ---------------------------
     dry = ft.Checkbox(label="Dry-run", value=False)
-    log = ft.Checkbox(label="Save log", value=True)
+    log = ft.Checkbox(label="Save JSON log", value=True)
+    csv_log = ft.Checkbox(label="Save CSV log", value=True)
     openf = ft.Checkbox(label="Open folder", value=True)
 
     # DB connection inputs (optional)
@@ -445,6 +446,7 @@ def main(page: ft.Page):
                 ),
                 dry,
                 log,
+                csv_log,
                 openf,
                 ft.Divider(height=6),
                 ft.Text(
@@ -538,8 +540,22 @@ def main(page: ft.Page):
                 merged = merge_result
                 per_row_logs = getattr(backend, "LAST_PER_ROW_LOGS", [])
 
+            # --- Summary Data ---
+            summary_data = {}
+            summary_data["Google"] = len(google_contacts)
+            summary_data["MSSQL"] = len(mssql_contacts)
+            summary_data["Total"] = len(merged)
+            def _sources_is_only_mssql(v):
+                s = set(v.get("sources") or [])
+                return s == {"MSSQL"}
+            def _sources_have_both(v):
+                s = set(v.get("sources") or [])
+                return ("Google" in s) and ("MSSQL" in s)
+            summary_data["New"] = sum(1 for v in merged.values() if _sources_is_only_mssql(v))
+            summary_data["Merged"] = sum(1 for v in merged.values() if _sources_have_both(v))
+            summary_data["Protected"] = sum(1 for v in merged.values() if v.get("protected"))
+
             # --- Export ---
-            # Determine output folder. Use CWD if path is not available (API case)
             google_path = state.get("google_path")
             base_dir = os.path.dirname(google_path) if google_path else os.getcwd()
 
@@ -549,39 +565,16 @@ def main(page: ft.Page):
             output_file = os.path.join(output_dir, f"merged_contacts_{ts}.csv")
 
             if not dry.value:
-                # Use template if available, otherwise the backend handles defaults
                 template_path = state.get("google_path")
                 backend.export_contacts(
                     merged, output_file=output_file, template=template_path
                 )
 
-            # --- Logging and Summary ---
+            # --- Logging ---
             if log.value:
-                logp = os.path.join(output_dir, f"merge_log_{ts}.txt")
-                with open(logp, "w", encoding="utf-8") as fh:
-                    fh.write(f"Merge run: {ts}\n")
-                    google_file_info = state.get("google_path") or "Google API Sync"
-                    fh.write(f"Google source: {google_file_info}\n")
-                    fh.write(
-                        f"MSSQL files: {[x['path'] for x in state.get('csvs', [])]}\n"
-                    )
-                    fh.write(f"Total merged contacts: {len(merged)}\n\n")
-
-                    if per_row_logs:
-                        fh.write("DETAILED ROW UPDATES:\n")
-                        for rec in per_row_logs:
-                            fh.write("---\n")
-                            fh.write("1) Original Google row:\n")
-                            og = rec.get("original_google_row")
-                            fh.write(str(og) + "\n" if og else "<no original row preserved>\n")
-                            fh.write("2) Update data applied:\n")
-                            fh.write(str(rec.get("update_data", {})) + "\n")
-                            fh.write("3) Final row in output:\n")
-                            fh.write(str(rec.get("final_row", {})) + "\n")
-                        fh.write("---\n")
-                    else:
-                        fh.write("No detailed per-row logs available.\n")
-                print(f"✅ Log saved to {logp}")
+                backend.write_detailed_log(per_row_logs, summary_data, ts)
+            if csv_log.value:
+                backend.write_detailed_csv_log(per_row_logs, ts)
 
             if openf.value and os.path.exists(output_dir):
                 try:
@@ -589,23 +582,9 @@ def main(page: ft.Page):
                 except Exception:
                     pass
 
-            data = {}
-            data["Google"] = len(google_contacts)
-            data["MSSQL"] = len(mssql_contacts)
-            data["Total"] = len(merged)
-            def _sources_is_only_mssql(v):
-                s = set(v.get("sources") or [])
-                return s == {"MSSQL"}
-            def _sources_have_both(v):
-                s = set(v.get("sources") or [])
-                return ("Google" in s) and ("MSSQL" in s)
-            data["New"] = sum(1 for v in merged.values() if _sources_is_only_mssql(v))
-            data["Merged"] = sum(1 for v in merged.values() if _sources_have_both(v))
-            data["Protected"] = sum(1 for v in merged.values() if v.get("protected"))
-
             progress_ring.visible = False
             progress_text.value = ""
-            show_summary(data)
+            show_summary(summary_data)
             page.open(
                 ft.SnackBar(
                     ft.Text("✅ Merge complete!"), bgcolor=theme_color(page, "success")

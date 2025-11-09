@@ -4,6 +4,8 @@ from collections import defaultdict
 from copy import deepcopy
 import os
 import json
+import logging
+from datetime import datetime
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -12,6 +14,28 @@ from googleapiclient.discovery import build
 # ===============================
 # 🔧 CONFIGURATION SECTION
 # ===============================
+
+LOG_DIR = "output"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+
+def setup_logging():
+    """Configures timestamped logging."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = os.path.join(LOG_DIR, f"merger_{timestamp}.log")
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(log_filename),
+            logging.StreamHandler(),
+        ],
+    )
+    return timestamp
+
+# Call setup_logging() at the start
+TIMESTAMP = setup_logging()
 
 # Normalized group name map (Arabic → English)
 GROUP_MAP = {
@@ -52,8 +76,12 @@ def safe_read_csv(path):
             df.columns = [
                 c.strip().replace("\ufeff", "").replace("ÿþ", "") for c in df.columns
             ]
+            logging.info(f"Successfully read CSV '{path}' with encoding '{enc}'.")
             return df
-        except Exception:
+        except Exception as e:
+            logging.warning(
+                f"Could not read CSV '{path}' with encoding '{enc}': {e}"
+            )
             continue
     raise ValueError(f"Cannot read file {path} with tried encodings.")
 
@@ -190,28 +218,36 @@ def _process_google_df(df):
 
 def load_google_contacts(path):
     """Loads Google contacts from a CSV file path and processes them."""
+    logging.info(f"Loading Google contacts from CSV: '{path}'")
     df = safe_read_csv(path)
-    return _process_google_df(df)
+    contacts = _process_google_df(df)
+    logging.info(f"Loaded {len(contacts)} Google contacts from CSV.")
+    return contacts
 
 
 def load_google_contacts_from_api():
     """
     Loads Google Contacts via API, converts to a DataFrame, and processes it.
     """
+    logging.info("Loading Google contacts from API.")
     creds = None
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
+            logging.info("Refreshing expired Google API token.")
             creds.refresh(Request())
         else:
             if not os.path.exists(CLIENT_SECRET_FILE):
+                logging.error(f"'{CLIENT_SECRET_FILE}' not found.")
                 raise FileNotFoundError(f"'{CLIENT_SECRET_FILE}' not found.")
+            logging.info("Initiating new Google OAuth2 flow.")
             flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
         with open(TOKEN_FILE, "w") as token:
             token.write(creds.to_json())
+            logging.info(f"Saved new Google API token to '{TOKEN_FILE}'.")
 
     service = build("people", "v1", credentials=creds)
 
@@ -220,26 +256,32 @@ def load_google_contacts_from_api():
         group_results = service.contactGroups().list().execute()
         for group in group_results.get("contactGroups", []):
             group_map[group.get("resourceName")] = group.get("formattedName")
+        logging.info(f"Fetched {len(group_map)} contact groups.")
     except Exception as e:
-        print(f"⚠️ Could not fetch contact group names: {e}.")
+        logging.warning(f"Could not fetch contact group names: {e}.")
 
     connections = []
     next_page_token = None
     while True:
-        results = (
-            service.people()
-            .connections()
-            .list(
-                resourceName="people/me",
-                pageSize=1000,
-                personFields="names,phoneNumbers,memberships,emailAddresses,organizations,addresses,biographies,birthdays,urls",
-                pageToken=next_page_token,
+        try:
+            results = (
+                service.people()
+                .connections()
+                .list(
+                    resourceName="people/me",
+                    pageSize=1000,
+                    personFields="names,phoneNumbers,memberships,emailAddresses,organizations,addresses,biographies,birthdays,urls",
+                    pageToken=next_page_token,
+                )
+                .execute()
             )
-            .execute()
-        )
-        connections.extend(results.get("connections", []))
-        next_page_token = results.get("nextPageToken")
-        if not next_page_token:
+            connections.extend(results.get("connections", []))
+            next_page_token = results.get("nextPageToken")
+            logging.info(f"Fetched {len(connections)} connections so far...")
+            if not next_page_token:
+                break
+        except Exception as e:
+            logging.error(f"An error occurred while fetching connections: {e}")
             break
 
     rows = []
@@ -318,24 +360,17 @@ def load_google_contacts_from_api():
         rows.append(row)
 
     if not rows:
+        logging.warning("No contacts found via Google API.")
         return {}
 
     df = pd.DataFrame(rows)
-
-    # DEBUG: Save the raw API DataFrame for inspection
-
-    # try:
-    #     df.to_csv("api_contacts_dataframe.csv", index=False, encoding="utf-8-sig")
-    #     print(
-    #         "✅ API contacts DataFrame saved to api_contacts_dataframe.csv for debugging."
-    #     )
-    # except Exception as e:
-    #     print(f"⚠️ Could not save API contacts DataFrame: {e}")
-
-    return _process_google_df(df)
+    contacts = _process_google_df(df)
+    logging.info(f"Loaded and processed {len(contacts)} contacts from Google API.")
+    return contacts
 
 
 def load_mssql_contacts(path):
+    logging.info(f"Loading MSSQL contacts from CSV: '{path}'")
     df = safe_read_csv(path)
     contacts = {}
     for _, row in df.iterrows():
@@ -361,15 +396,18 @@ def load_mssql_contacts(path):
             "original_name": full,
             "_cmp_name": cmp_name,
         }
+    logging.info(f"Loaded {len(contacts)} MSSQL contacts from CSV.")
     return contacts
 
 
 def load_mssql_from_db(
     server: str, database: str, user: str, password: str, query: str | None = None
 ):
+    logging.info(f"Loading MSSQL contacts from database: {server}/{database}")
     try:
         import pyodbc
     except Exception as e:
+        logging.error("pyodbc is required to load from MSSQL.")
         raise RuntimeError("pyodbc is required to load from MSSQL.") from e
 
     if not query:
@@ -389,40 +427,51 @@ def load_mssql_from_db(
         try:
             conn_str = f"DRIVER={{{drv}}};SERVER={server};DATABASE={database};UID={user};PWD={password};TrustServerCertificate=YES"
             conn = pyodbc.connect(conn_str, timeout=10)
+            logging.info(f"Connected to MSSQL database with driver '{drv}'.")
             break
         except pyodbc.Error as e:
             last_err = e
     if conn is None:
+        logging.error(f"Cannot connect to database. Last error: {last_err}")
         raise RuntimeError(f"Cannot connect to database. Last error: {last_err}")
 
     contacts = {}
     cur = conn.cursor()
-    cur.execute(query)
-    for row in cur.fetchall():
-        full = str(row[0] or "").strip()
-        nums_list = expand_normalize_numbers([str(v) for v in row[1:] if v])
-        if not nums_list:
-            continue
+    try:
+        cur.execute(query)
+        for row in cur.fetchall():
+            full = str(row[0] or "").strip()
+            nums_list = expand_normalize_numbers([str(v) for v in row[1:] if v])
+            if not nums_list:
+                continue
 
-        parts = [p for p in full.split() if p]
-        first = parts[0] if parts else ""
-        middle = " ".join(parts[1:]) if len(parts) > 1 else ""
-        last = "Lab"
-        raw_display = (first + (" " + middle if middle else "") + (" " + last)).strip()
-        display_name = normalize_display_name(raw_display, append_lab=True)
-        cmp_name = strip_lab_token(display_name).lower()
+            parts = [p for p in full.split() if p]
+            first = parts[0] if parts else ""
+            middle = " ".join(parts[1:]) if len(parts) > 1 else ""
+            last = "Lab"
+            raw_display = (
+                first + (" " + middle if middle else "") + (" " + last)
+            ).strip()
+            display_name = normalize_display_name(raw_display, append_lab=True)
+            cmp_name = strip_lab_token(display_name).lower()
 
-        contacts[display_name] = {
-            "numbers": set(nums_list),
-            "sources": {"MSSQL"},
-            "first_name": first,
-            "middle_name": middle,
-            "last_name": last,
-            "original_name": full,
-            "_cmp_name": cmp_name,
-        }
-    cur.close()
-    conn.close()
+            contacts[display_name] = {
+                "numbers": set(nums_list),
+                "sources": {"MSSQL"},
+                "first_name": first,
+                "middle_name": middle,
+                "last_name": last,
+                "original_name": full,
+                "_cmp_name": cmp_name,
+            }
+    except Exception as e:
+        logging.error(f"Failed to fetch or process data from MSSQL: {e}")
+    finally:
+        cur.close()
+        conn.close()
+        logging.info("Closed MSSQL database connection.")
+
+    logging.info(f"Loaded {len(contacts)} contacts from MSSQL database.")
     return contacts
 
 
@@ -435,6 +484,7 @@ def _merge_entry_into(merged, src_name, dst_name, phone_to_names):
     if src_name == dst_name or src_name not in merged or dst_name not in merged:
         return
     src, dst = merged[src_name], merged[dst_name]
+    logging.debug(f"Merging '{src_name}' into '{dst_name}'.")
 
     for n in list(src.get("numbers") or []):
         dst.setdefault("numbers", set()).add(n)
@@ -464,6 +514,8 @@ def merge_contacts(google, mssql):
     phone_to_names = defaultdict(set)
     merged = {}
     per_row_logs = []
+    logging.info("Starting contact merge process.")
+    logging.info(f"Initial Google contacts: {len(google)}, MSSQL contacts: {len(mssql)}")
 
     google_cmp_index = {}
     for g_name, g_data in google.items():
@@ -492,6 +544,8 @@ def merge_contacts(google, mssql):
         if g_data.get("_raw_row"):
             entry["_raw_row"] = deepcopy(g_data.get("_raw_row"))
 
+    logging.info(f"After initial Google processing, merged has {len(merged)} entries.")
+
     cmp_to_names = defaultdict(list)
     for nm in list(merged.keys()):
         g_cmp = (google.get(nm, {}).get("_cmp_name") or strip_lab_token(nm)).lower()
@@ -504,6 +558,7 @@ def merge_contacts(google, mssql):
             for n in names:
                 if n != canonical and n in merged:
                     _merge_entry_into(merged, n, canonical, phone_to_names)
+    logging.info(f"After name-based merging, merged has {len(merged)} entries.")
 
     for phone, names in list(phone_to_names.items()):
         names_list = [n for n in names if n in merged]
@@ -515,6 +570,7 @@ def merge_contacts(google, mssql):
             for n in names_list:
                 if n != canonical and n in merged:
                     _merge_entry_into(merged, n, canonical, phone_to_names)
+    logging.info(f"After phone-based merging, merged has {len(merged)} entries.")
 
     for m_name, m_data in mssql.items():
         existing = None
@@ -600,6 +656,8 @@ def merge_contacts(google, mssql):
             if existing_name.strip().lower() == nm_norm and existing_name != m_name:
                 entry["duplicates"].add(existing_name)
 
+    logging.info(f"After processing MSSQL contacts, merged has {len(merged)} entries.")
+
     for phone, names in list(phone_to_names.items()):
         names_list = [n for n in names if n in merged]
         if len(names_list) > 1:
@@ -611,12 +669,69 @@ def merge_contacts(google, mssql):
                 if n != canonical and n in merged:
                     _merge_entry_into(merged, n, canonical, phone_to_names)
 
-    try:
-        global LAST_PER_ROW_LOGS
-        LAST_PER_ROW_LOGS = per_row_logs
-    except Exception:
-        pass
+    logging.info(f"Final merged contact count: {len(merged)}")
     return merged, per_row_logs
+
+
+def write_detailed_log(per_row_logs, summary_data, timestamp):
+    """Writes the detailed per-row logs and a summary to a timestamped JSON file."""
+    if not per_row_logs:
+        logging.info("No detailed merge logs to write.")
+        return
+
+    log_path = os.path.join(LOG_DIR, f"merge_log_{timestamp}.json")
+    logging.info(f"Writing detailed merge log to '{log_path}'")
+
+    # Prepare the full log data with a summary section
+    full_log = {
+        "summary": summary_data,
+        "details": per_row_logs
+    }
+
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(full_log, f, indent=2, ensure_ascii=False)
+        logging.info(f"Successfully wrote {len(per_row_logs)} detailed log entries with summary.")
+    except Exception as e:
+        logging.error(f"Failed to write detailed log: {e}")
+
+
+def write_detailed_csv_log(per_row_logs, timestamp):
+    """Writes the detailed per-row logs to a timestamped CSV file."""
+    if not per_row_logs:
+        return
+
+    log_path = os.path.join(LOG_DIR, f"merge_log_{timestamp}.csv")
+    logging.info(f"Writing detailed CSV log to '{log_path}'")
+
+    rows = []
+    for log_entry in per_row_logs:
+        google_name = log_entry.get("google_name", "")
+        update_data = log_entry.get("update_data", {})
+        final_row = log_entry.get("final_row", {})
+
+        row = {
+            "Google Contact": google_name,
+            "MSSQL Name": update_data.get("mssql_name", ""),
+            "MSSQL Original Name": update_data.get("mssql_original_name", ""),
+            "Added Numbers": ", ".join(update_data.get("added_numbers", [])),
+            "Added First Name": update_data.get("added_first_name", False),
+            "Added Last Name": update_data.get("added_last_name", False),
+            "Final Phone Numbers": final_row.get("Phones", ""),
+            "Final Group Membership": final_row.get("Group Membership", ""),
+            "Final Sources": final_row.get("Sources", ""),
+            "Final Duplicates": final_row.get("Duplicates", ""),
+        }
+        rows.append(row)
+
+    if not rows:
+        return
+
+    try:
+        pd.DataFrame(rows).to_csv(log_path, index=False, encoding="utf-8-sig")
+        logging.info(f"Successfully wrote {len(rows)} detailed log entries to CSV.")
+    except Exception as e:
+        logging.error(f"Failed to write detailed CSV log: {e}")
 
 
 # ===============================
@@ -627,13 +742,15 @@ def merge_contacts(google, mssql):
 def export_contacts(
     merged, output_file="merged_contacts.csv", template: str | None = None
 ):
+    logging.info(f"Exporting {len(merged)} contacts to '{output_file}'.")
     fieldnames = None
     if template:
         try:
             df = safe_read_csv(template)
             fieldnames = list(df.columns)
-        except Exception:
-            pass
+            logging.info(f"Using template '{template}' for export fields.")
+        except Exception as e:
+            logging.warning(f"Could not read template file '{template}': {e}")
     if fieldnames and "Name" in fieldnames:
         try:
             fieldnames = [c for c in fieldnames if c != "Name"]
@@ -660,6 +777,7 @@ def export_contacts(
             "Custom Field 2 - Label",
             "Custom Field 2 - Value",
         ]
+        logging.info("No template found. Using default field names for export.")
 
     required_cols = [
         "First Name",
@@ -734,21 +852,13 @@ def export_contacts(
             row["Custom Field 2 - Value"] = sources
         rows.append(row)
 
-    pd.DataFrame(rows, columns=fieldnames).to_csv(
-        output_file, index=False, encoding="utf-8-sig"
-    )
-    print(f"Saved {len(rows)} contacts to '{output_file}'")
+    try:
+        pd.DataFrame(rows, columns=fieldnames).to_csv(
+            output_file, index=False, encoding="utf-8-sig"
+        )
+        logging.info(f"Successfully saved {len(rows)} contacts to '{output_file}'")
+    except Exception as e:
+        logging.error(f"Failed to save contacts to '{output_file}': {e}")
 
 
-# ===============================
-# 🚀 MAIN EXECUTION
-# ===============================
-if __name__ == "__main__":
-    google_contacts = load_google_contacts("contacts.csv")
-    mssql_contacts = load_mssql_contacts("contact numbers 24-10-2025.csv")
-    print(f"Google contacts loaded: {len(google_contacts)}")
-    print(f"MSSQL contacts loaded: {len(mssql_contacts)}")
-    merged, _ = merge_contacts(google_contacts, mssql_contacts)
-    print("Exporting merged contacts...")
-    export_contacts(merged)
-    print("Merge complete.")
+
